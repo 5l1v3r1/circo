@@ -1,0 +1,9 @@
+# Byte-compiled 
+__pycache__/
+
+# Ignore virtualenv
+bin/
+include/
+lib/
+pyvenv.cfg
+share/
