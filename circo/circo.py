@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import configparser
 import logging
@@ -32,17 +32,6 @@ from scapy.all import *
 # Me
 __author__ = "Emilio / @ekio_jp"
 __version__ = "2.0"
-
-# Default options OFF
-DEBUG = False
-EAP = False
-EPING = False
-ETRACE = False
-EDNS = False
-EWEB = False
-ESSL = False
-EPRX = False
-ENTP = False
 
 # Perm files
 snmptpl = dirname + 'Cisco_2960-tpl.snmpwalk'
@@ -263,158 +252,6 @@ class APHandler(threading.Thread):
                                   count=self.count, verbose=0)
                         time.sleep(2)
                 time.sleep(10)
-
-    def join(self):
-        self.stoprequest.set()
-
-
-class CDPHandler(threading.Thread):
-    """
-    Class to handle CDP packets, will start in background and send
-    packets every 60 seconds, pretend to be a Cisco Phone or Switch
-    """
-    def __init__(self, iface, mac, ip, name, port, switch):
-        threading.Thread.__init__(self)
-        self.stoprequest = threading.Event()
-        self.iface = iface
-        self.mac = mac
-        self.ip = ip
-        self.name = name
-        self.port = port
-        self.switch = switch
-
-    def run(self):
-        # Build Fake CDP packet
-        fakepkt = Dot3()/LLC()/SNAP()/CDPv2_HDR()
-        fakepkt[Dot3].dst = '01:00:0c:cc:cc:cc'
-        fakepkt[Dot3].src = self.mac
-        fakepkt[CDPv2_HDR].msg = CDPMsgDeviceID()
-        fakepkt[CDPMsgDeviceID].val = self.name
-        fakepkt[CDPMsgDeviceID].len = len(fakepkt[CDPMsgDeviceID])
-        fakepkt = fakepkt/CDPMsgSoftwareVersion()
-	if self.switch:
-            fakepkt[CDPMsgSoftwareVersion].val = 'Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE, RELEASE SOFTWARE (fc1)\nTechnical Support: http://www.cisco.com/techsupport\nCopyright (c) 1986-2012 by Cisco Systems, Inc.\nCompiled Sat 28-Jul-12 00:29 by prod_rel_team'
-	else:
-            fakepkt[CDPMsgSoftwareVersion].val = 'SIP75.8-5-3SR1S'
-
-        fakepkt[CDPMsgSoftwareVersion].len = len(fakepkt[CDPMsgSoftwareVersion])
-        fakepkt = fakepkt/CDPMsgPlatform()
-        if self.switch:
-            fakepkt[CDPMsgPlatform].val = 'cisco WS-C2960-8TC-L'
-        else:
-            fakepkt[CDPMsgPlatform].val = 'Cisco IP Phone 7975'
-        fakepkt[CDPMsgPlatform].len = len(fakepkt[CDPMsgPlatform])
-        fakepkt = fakepkt/CDPMsgAddr()
-        fakepkt[CDPMsgAddr].naddr = 1
-        fakepkt[CDPMsgAddr].addr = CDPAddrRecordIPv4()
-        fakepkt[CDPMsgAddr][CDPAddrRecordIPv4].addr = self.ip
-        fakepkt = fakepkt/CDPMsgPortID()
-        fakepkt[CDPMsgPortID].iface = self.port
-        fakepkt[CDPMsgPortID].len = len(fakepkt[CDPMsgPortID])
-        if self.switch:
-            fakepkt = fakepkt/CDPMsgCapabilities(cap=40)
-            fakepkt = fakepkt/CDPMsgProtoHello()
-            fakepkt[CDPMsgProtoHello].protocol_id = 0x112
-            fakepkt[CDPMsgProtoHello].data = '\x00\x00\x00\x00\xff\xff\xff\xff\x01\x02!\xff\x00\x00\x00\x00\x00\x00X\x97\x1e\x1c/\x00\xff\x00\x00'
-            fakepkt[CDPMsgProtoHello].len = len(fakepkt[CDPMsgProtoHello])
-            fakepkt = fakepkt/CDPMsgVTPMgmtDomain()
-            fakepkt[CDPMsgVTPMgmtDomain].len = len(fakepkt[CDPMsgVTPMgmtDomain])
-            fakepkt = fakepkt/CDPMsgNativeVLAN()
-            fakepkt[CDPMsgNativeVLAN].vlan = 100
-            fakepkt[CDPMsgNativeVLAN].len = len(fakepkt[CDPMsgNativeVLAN])
-            fakepkt = fakepkt/CDPMsgDuplex(duplex=1)
-            fakepkt = fakepkt/CDPMsgTrustBitmap()
-            fakepkt = fakepkt/CDPMsgUntrustedPortCoS()
-            fakepkt = fakepkt/CDPMsgMgmtAddr()
-            fakepkt[CDPMsgMgmtAddr].naddr = 1
-            fakepkt[CDPMsgMgmtAddr].addr = CDPAddrRecordIPv4()
-            fakepkt[CDPMsgMgmtAddr][CDPAddrRecordIPv4].addr = self.ip
-            fakepkt = fakepkt/CDPMsgGeneric()
-            fakepkt[CDPMsgGeneric].type = 26
-            fakepkt[CDPMsgGeneric].val = '\x00\x00\x00\x01\x00\x00\x00\x00\xff\xff\xff\xff'
-            fakepkt[CDPMsgGeneric].len = len(fakepkt[CDPMsgGeneric])
-            fakepkt = fakepkt/CDPMsgGeneric(type=31, len=5, val='\x00')
-            fakepkt = fakepkt/CDPMsgGeneric(type=4099, len=5, val='1')
-        else:
-            fakepkt = fakepkt/CDPMsgCapabilities(cap=1168)
-            fakepkt = fakepkt/CDPMsgGeneric()
-            fakepkt[CDPMsgGeneric].type = 28
-            fakepkt[CDPMsgGeneric].val = '\x00\x02\x00'
-            fakepkt[CDPMsgGeneric].len = len(fakepkt[CDPMsgGeneric])
-            fakepkt = fakepkt/CDPMsgUnknown19()
-            fakepkt[CDPMsgUnknown19].type = 25
-            fakepkt[CDPMsgUnknown19].val = 'y\x85\x00\x00\x00\x00.\xe0'
-            fakepkt[CDPMsgUnknown19].len = len(fakepkt[CDPMsgUnknown19])
-            fakepkt = fakepkt/CDPMsgDuplex(duplex=1)
-            fakepkt = fakepkt/CDPMsgPower(type=16,power=12000)
-
-        # re-calculate len & cksum
-        del fakepkt.cksum
-        del fakepkt.len
-        fakepkt.len = len(fakepkt[CDPv2_HDR]) + 8
-        fakepkt = fakepkt.__class__(str(fakepkt))
-
-        while not self.stoprequest.isSet():
-            sendp(fakepkt, verbose=0, iface=self.iface)
-            time.sleep(60)
-
-    def join(self):
-        self.stoprequest.set()
-
-
-class LLDPHandler(threading.Thread):
-    """
-    Class to handle LLDP packets, will start in background and send
-    packets every 30 seconds, pretend to be a Cisco Phone or Switch
-    """
-    def __init__(self, iface, mac, ip, name, port, switch):
-        threading.Thread.__init__(self)
-        self.stoprequest = threading.Event()
-        self.iface = iface
-        self.mac = mac
-        self.ip = ip
-        self.name = name
-        self.port = port
-        self.switch = switch
-
-    def run(self):
-        pkteth = Ether(dst='01:80:c2:00:00:0e', src=self.mac, type=35020)
-        pktchass = LLDPDUChassisID(_type=1, subtype=4, _length=7, id=self.mac)
-        pktportid = LLDPDUPortID(_type=2, subtype=5)
-        pktportid.id = self.port[:2] + re.findall(r'[0-9/]+', self.port)[0]
-        pktportid._length = len(pktportid[LLDPDUPortID].id) + 1
-        pktttl = LLDPDUTimeToLive(_type=3, ttl=120, _length=2)
-        pktsys = LLDPDUSystemName(_type=5, system_name=self.name)
-        pktsys._length = len(pktsys[LLDPDUSystemName].system_name)
-        pktdes = LLDPDUSystemDescription(_type=6)
-        if self.switch:
-            pktdes.description = 'Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE, RELEASE SOFTWARE (fc1)\nTechnical Support: http://www.cisco.com/techsupport\nCopyright (c) 1986-2012 by Cisco Systems, Inc.\nCompiled Sat 28-Jul-12 00:29 by prod_rel_team'
-        else:
-            pktdes.description = 'SIP75.8-5-3SR1S'
-        pktdes._length = len(pktdes[LLDPDUSystemDescription].description)
-        pktport = LLDPDUPortDescription(_type=4, description=self.port)
-        pktport._length = len(pktport[LLDPDUPortDescription].description)
-        pktsyscap = LLDPDUSystemCapabilities(_type=7, _length=4, mac_bridge_available=1, mac_bridge_enabled=1)
-        pktmgt = LLDPDUManagementAddress(_type=8, _length=12)
-        pktmgt.management_address = (chr(int(self.ip.split('.')[0]))
-                                     + chr(int(self.ip.split('.')[1]))
-                                     + chr(int(self.ip.split('.')[2]))
-                                     + chr(int(self.ip.split('.')[3])))
-        pktmgt._management_address_string_length = 5
-        pktmgt.management_address_subtype = 1
-        pktmgt.interface_numbering_subtype = 3
-        pktmgt.interface_number = long(100)
-        pktmgt._oid_string_length = 0
-        pktmgt.object_id = ''
-        pkt8021 = LLDPDUGenericOrganisationSpecific(_type=127, _length=6, org_code=32962, subtype=1, data='\x00d')
-        pkt8023 = LLDPDUGenericOrganisationSpecific(_type=127, _length=9, org_code=4623, subtype=1, data='\x03l\x03\x00\x10')
-        pktend = LLDPDUEndOfLLDPDU(_type=0, _length=0)
-        pkt = pkteth / pktchass / pktportid / pktttl / pktsys / pktdes \
-            / pktport / pktsyscap / pktmgt / pkt8021 / pkt8023 / pktend
-
-        while not self.stoprequest.isSet():
-            sendp(pkt, iface=self.iface, verbose=0)
-            time.sleep(30)
 
     def join(self):
         self.stoprequest.set()
@@ -1075,18 +912,16 @@ def main():
         print('Hostname setup - switch')
 
     # Start fake CDP as 'switch'
-    cdpdh = CDPHandler(iface, switchmac, ip, fakeswname, switchport, True)
+    cdpdh = CDPHandler(IFACE, SWMAC, ip, fakeswname, SWPORT, 'C2960', 'switch')
     cdpdh.daemon = True
     cdpdh.start()
-    if DEBUG:
-        print('CDPd started - switch')
+    logger.debug('CDP started - switch')
 
     # Start fake LLDP as 'switch'
-    lldpdh = LLDPHandler(iface, switchmac, ip, fakeswname, switchport, True)
+    lldpdh = LLDPHandler(IFACE, SWMAC, ip, fakeswname, SWPORT, 'C2960', 'switch')
     lldpdh.daemon = True
     lldpdh.start()
-    if DEBUG:
-        print('LLDP started - switch')
+    logger.debug('LLDP started - switch')
 
     # Create SNMP config for snmposter daemon
     ipnet = str(ipcalc.Network(ip + '/' + netmask).network())

@@ -1,5 +1,5 @@
 """
-Cisco Discovery Protocol Honeypot
+Cisco Discovery Protocol (CDP) Honeypot
 """
 import logging
 import re
@@ -87,7 +87,6 @@ class CDPHandler(threading.Thread):
         fakepkt[CDPMsgGeneric].len = len(fakepkt[CDPMsgGeneric])
         fakepkt = fakepkt/CDPMsgGeneric(type=31, len=5, val='\x00')
         fakepkt = fakepkt/CDPMsgGeneric(type=4099, len=5, val='1')
-
         # re-calculate len & cksum (Maybe not need it as crafted from zero)
         del fakepkt.cksum
         del fakepkt.len
